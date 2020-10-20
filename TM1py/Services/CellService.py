@@ -357,7 +357,7 @@ class CellService(ObjectService):
 
     def write(self, cube_name: str, cellset_as_dict: Dict, dimensions: Iterable[str] = None, increment: bool = False,
               deactivate_transaction_log: bool = False, reactivate_transaction_log: bool = False,
-              sandbox_name: str = None, **kwargs) -> Response:
+              sandbox_name: str = None, use_ti=False, **kwargs) -> Response:
         """ Write values to a cube
 
         Same signature as `write_values` method, but faster since it uses `write_values_through_cellset`
@@ -373,6 +373,7 @@ class CellService(ObjectService):
         :param deactivate_transaction_log: deactivate before writing
         :param reactivate_transaction_log: reactivate after writing
         :param sandbox_name: str
+        :param use_ti: Use unbound process to write. Requires admin permissions. causes massive peformance improvement.
         :return: Response
         """
         if not dimensions:
@@ -394,6 +395,44 @@ class CellService(ObjectService):
             reactivate_transaction_log=reactivate_transaction_log,
             sandbox_name=sandbox_name,
             **kwargs)
+
+    @manage_transaction_log
+    def write_through_unbound_process(self, cube_name: str, cellset_as_dict: Dict, increment: bool = False,
+                                      sandbox_name: str = None, **kwargs):
+        if sandbox_name:
+            raise NotImplementedError("Function does not support writing to sandboxes yet")
+
+        from TM1py import ProcessService
+        proccess_service = ProcessService(self._rest)
+
+        successes = list()
+        lines = list()
+
+        function_str = f"{'CellIncrementN(' if increment else 'CellPutN('}"
+        for coordinates, value in cellset_as_dict.items():
+            value_str = f'{value}' if isinstance(value, str) else str(value)
+
+            line = "".join([
+                function_str,
+                value_str,
+                f",'{cube_name}',",
+                ",".join(f"'{element}'" for element in coordinates),
+                ");"])
+            lines.append(line)
+
+        for n, line in enumerate(lines):
+            if n > 0 and n % Process.MAX_STATEMENTS == 0:
+                process = Process(name="", prolog_procedure="".join(lines))
+                success, _, _ = proccess_service.execute_process_with_return(process, **kwargs)
+                successes.append(success)
+                lines = list()
+
+        process = Process(name="", prolog_procedure="".join(lines))
+        success, _, _ = proccess_service.execute_process_with_return(process, **kwargs)
+        successes.append(success)
+
+        if not all(successes):
+            raise TM1pyException(f"{len(successes) - sum(successes)} out of {len(successes)} unbound processes failed")
 
     @manage_transaction_log
     def write_values(self, cube_name: str, cellset_as_dict: Dict, dimensions: Iterable[str] = None,
